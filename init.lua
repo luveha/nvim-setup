@@ -64,6 +64,7 @@ vim.pack.add({
 	"https://github.com/nvim-treesitter/nvim-treesitter",
 	"https://github.com/nvim-mini/mini.nvim",
 	"https://github.com/MeanderingProgrammer/render-markdown.nvim",
+	"https://github.com/iamcco/markdown-preview.nvim", -- browser-based live preview (:MarkdownPreview)
 	"https://github.com/nvim-telescope/telescope.nvim",
 	"https://github.com/brenoprata10/nvim-highlight-colors",
 
@@ -333,6 +334,23 @@ require("render-markdown").setup({
 	},
 })
 
+-- markdown-preview.nvim ships a Node server that must be fetched once.
+-- mkdp#util#install() downloads a prebuilt binary (no yarn build required). Run
+-- it on first use if the server isn't present yet, so a fresh clone self-heals
+-- without a manual step. `open the browser only on the :MarkdownPreview command`.
+vim.g.mkdp_auto_start = 0
+vim.g.mkdp_auto_close = 1
+vim.api.nvim_create_autocmd("FileType", {
+	pattern = { "markdown" },
+	once = true,
+	callback = function()
+		local bin = vim.fn.expand(vim.fn.stdpath("data") .. "/site/pack/core/opt/markdown-preview.nvim/app/bin")
+		if vim.fn.isdirectory(bin) == 0 or vim.fn.empty(vim.fn.glob(bin .. "/markdown-preview-*")) == 1 then
+			pcall(vim.fn["mkdp#util#install"])
+		end
+	end,
+})
+
 -- Notebook headers use empty Bootstrap icon tags like
 -- `<i class="bi bi-exclamation-octagon-fill" style="color: red;"></i>`. These
 -- are webfont glyphs the terminal can't draw and render-markdown conceals them
@@ -495,18 +513,10 @@ require("mini.clue").setup({
 		{ mode = "n", keys = "<Leader>m",  desc = "+metals" },
 		{ mode = "n", keys = "<Leader>mc", desc = "Metals commands" },
 		{ mode = "n", keys = "<Leader>mh", desc = "Metals hover worksheet" },
+		-- <leader>j is shared: Java's "run class" (buffer-local in .java) and
+		-- Molten's jupyter maps (buffer-local in python/markdown). Both are
+		-- registered per-buffer, so mini.clue surfaces the right ones by filetype.
 		{ mode = "n", keys = "<Leader>j",  desc = "+jupyter/java" },
-		{ mode = "n", keys = "<Leader>ji", desc = "Molten init kernel" },
-		{ mode = "n", keys = "<Leader>jj", desc = "Molten run cell/block" },
-		{ mode = "n", keys = "<Leader>jl", desc = "Molten evaluate line" },
-		{ mode = "n", keys = "<Leader>jc", desc = "Molten re-evaluate cell" },
-		{ mode = "n", keys = "<Leader>je", desc = "Molten evaluate operator" },
-		{ mode = "n", keys = "<Leader>jo", desc = "Molten enter output" },
-		{ mode = "n", keys = "<Leader>jh", desc = "Molten hide output" },
-		{ mode = "n", keys = "<Leader>jx", desc = "Molten delete cell" },
-		{ mode = "n", keys = "<Leader>ja", desc = "Molten run all cells" },
-		{ mode = "n", keys = "<Leader>jb", desc = "Molten run cells above cursor" },
-		{ mode = "n", keys = "<Leader>jr", desc = "Run current Java class" },
 		{ mode = "n", keys = "<Leader>rn", desc = "Rename symbol" },
 	},
 })
@@ -561,10 +571,20 @@ vim.keymap.set("n", "<leader>?", function()
 	local results = {}
 
 	for _, mode in ipairs({ "n", "v" }) do
-		for _, map in ipairs(vim.api.nvim_get_keymap(mode)) do
-			if map.desc and map.lhs:sub(1, 1) == " " then
+		local seen = {}
+		local function add(map)
+			if map.desc and map.desc ~= "" and map.lhs:sub(1, 1) == " " and not seen[map.lhs] then
+				seen[map.lhs] = true
 				table.insert(results, { mode = mode, lhs = map.lhs, desc = map.desc })
 			end
+		end
+		-- Buffer-local maps first so they shadow same-key globals (e.g. Molten
+		-- <leader>j* in a notebook, Scala <leader>sc* in a .scala buffer).
+		for _, map in ipairs(vim.api.nvim_buf_get_keymap(0, mode)) do
+			add(map)
+		end
+		for _, map in ipairs(vim.api.nvim_get_keymap(mode)) do
+			add(map)
 		end
 	end
 
@@ -631,6 +651,13 @@ vim.keymap.set("n", "<leader>e", function()
 end, {
 	desc = "Toggle file tree",
 })
+
+vim.keymap.set("n", "<leader>lr", function()
+	for _, client in ipairs(vim.lsp.get_clients()) do
+		client:stop()
+	end
+	vim.cmd("edit")
+end, { desc = "Restart LSP" })
 -- ============================================================
 -- Completion
 -- ============================================================
@@ -744,7 +771,9 @@ vim.api.nvim_create_autocmd("LspAttach", {
 					if node:type() == "for_expression" then return end
 					node = node:parent()
 				end
-				vim.lsp.buf.signature_help()
+				-- Non-focusable so the popup can never steal the cursor; bordered
+				-- so it reads as an overlay rather than covering the line inline.
+				vim.lsp.buf.signature_help({ focusable = false, border = "rounded" })
 			end,
 		})
 
@@ -844,6 +873,7 @@ vim.lsp.config("gopls", {
 		gopls = {
 			analyses = {
 				unusedparams = true,
+				ST1000 = false,
 			},
 			gofumpt = true,
 			staticcheck = true,
@@ -1083,6 +1113,31 @@ vim.api.nvim_create_autocmd("FileType", {
 
 		local root = require("jdtls.setup").find_root({ "settings.gradle", "settings.gradle.kts", "gradlew", "pom.xml", ".git" })
 
+		-- jdtls 1.60 drives Gradle imports with its bundled Gradle 8.9, which
+		-- cannot run under JDK 26 ("Unsupported class file major version 70" /
+		-- "Can't use Java 26 and Gradle 8.9 to import"). The import then fails
+		-- silently and no diagnostics ever appear. jdtls only falls back to 8.9
+		-- when the project has no wrapper -- with a wrapper it runs ./gradlew,
+		-- whose pinned Gradle (system `gradle`, a JDK-26-compatible 9.x) imports
+		-- fine. So for any Gradle project missing a wrapper, generate one once
+		-- (pinned to the installed gradle) before starting jdtls. The `gradle
+		-- wrapper` task only writes gradlew scripts; it doesn't build anything.
+		local has_gradle = root
+			and (vim.fn.filereadable(root .. "/settings.gradle") == 1
+				or vim.fn.filereadable(root .. "/settings.gradle.kts") == 1
+				or vim.fn.filereadable(root .. "/build.gradle") == 1
+				or vim.fn.filereadable(root .. "/build.gradle.kts") == 1)
+		if has_gradle
+			and vim.fn.filereadable(root .. "/gradlew") == 0
+			and vim.fn.executable("gradle") == 1
+		then
+			vim.notify("jdtls: generating Gradle wrapper in " .. root, vim.log.levels.INFO)
+			vim.fn.system({ "gradle", "--project-dir", root, "wrapper" })
+			if vim.v.shell_error ~= 0 then
+				vim.notify("jdtls: `gradle wrapper` failed; Java diagnostics may be unavailable", vim.log.levels.WARN)
+			end
+		end
+
 		require("jdtls").start_or_attach({
 			capabilities = capabilities,
 			cmd = { "jdtls", "--data", workspace_dir },
@@ -1292,20 +1347,6 @@ vim.g.molten_wrap_output = true
 vim.g.molten_virt_text_output = true
 vim.g.molten_virt_lines_off_by_1 = true
 
-local function molten_map(lhs, rhs, desc, mode)
-	vim.keymap.set(mode or "n", lhs, rhs, { silent = true, desc = desc })
-end
-
-molten_map("<leader>ji", ":MoltenInit<CR>", "Molten: init kernel")
-molten_map("<leader>jl", ":MoltenEvaluateLine<CR>", "Molten: evaluate line")
-molten_map("<leader>jc", ":MoltenReevaluateCell<CR>", "Molten: re-evaluate cell")
-molten_map("<leader>je", ":MoltenEvaluateOperator<CR>", "Molten: evaluate operator")
-molten_map("<leader>jv", ":<C-u>MoltenEvaluateVisual<CR>gv", "Molten: evaluate selection", "v")
-molten_map("<leader>jo", ":noautocmd MoltenEnterOutput<CR>", "Molten: enter output")
-molten_map("<leader>jh", ":MoltenHideOutput<CR>", "Molten: hide output")
-molten_map("<leader>jx", ":MoltenDelete<CR>", "Molten: delete cell")
-molten_map("<leader>jr", ":MoltenRestart!<CR>", "Molten: restart kernel")
-
 -- Run the whole code cell under the cursor. In markdown notebooks (jupytext),
 -- cells are ```python fences; in .py files they are `# %%` blocks. Evaluates
 -- the enclosing block via Molten (kernel must be initialized first).
@@ -1369,8 +1410,6 @@ local function molten_run_cell()
 	-- shows immediately, without jumping into the next cell.
 	vim.api.nvim_win_set_cursor(0, { math.min(e + 1, total), 0 })
 end
-
-vim.keymap.set("n", "<leader>jj", molten_run_cell, { silent = true, desc = "Molten: run cell/block" })
 
 -- Every code cell in the buffer as { s = first line, e = last line }, in order.
 -- Mirrors molten_run_cell's cell detection: ```fences in markdown, `# %%` in
@@ -1453,10 +1492,26 @@ vim.api.nvim_create_user_command("MoltenRunAbove", function()
 	molten_run_cells(true)
 end, { desc = "Molten: run every cell above the cursor" })
 
-vim.keymap.set("n", "<leader>ja", function()
-	molten_run_cells(false)
-end, { silent = true, desc = "Molten: run all cells" })
-
-vim.keymap.set("n", "<leader>jb", function()
-	molten_run_cells(true)
-end, { silent = true, desc = "Molten: run cells above cursor" })
+-- Molten keymaps are buffer-local to notebook buffers -- python and markdown
+-- (jupytext opens .ipynb as markdown) -- so they don't leak into other filetypes
+-- like Scala, and <leader>? / mini.clue only surface them where they apply.
+vim.api.nvim_create_autocmd("FileType", {
+	pattern = { "python", "markdown" },
+	callback = function(event)
+		local function map(mode, lhs, rhs, desc)
+			vim.keymap.set(mode, lhs, rhs, { buffer = event.buf, silent = true, desc = desc })
+		end
+		map("n", "<leader>ji", ":MoltenInit<CR>", "Molten: init kernel")
+		map("n", "<leader>jl", ":MoltenEvaluateLine<CR>", "Molten: evaluate line")
+		map("n", "<leader>jc", ":MoltenReevaluateCell<CR>", "Molten: re-evaluate cell")
+		map("n", "<leader>je", ":MoltenEvaluateOperator<CR>", "Molten: evaluate operator")
+		map("v", "<leader>jv", ":<C-u>MoltenEvaluateVisual<CR>gv", "Molten: evaluate selection")
+		map("n", "<leader>jo", ":noautocmd MoltenEnterOutput<CR>", "Molten: enter output")
+		map("n", "<leader>jh", ":MoltenHideOutput<CR>", "Molten: hide output")
+		map("n", "<leader>jx", ":MoltenDelete<CR>", "Molten: delete cell")
+		map("n", "<leader>jr", ":MoltenRestart!<CR>", "Molten: restart kernel")
+		map("n", "<leader>jj", molten_run_cell, "Molten: run cell/block")
+		map("n", "<leader>ja", function() molten_run_cells(false) end, "Molten: run all cells")
+		map("n", "<leader>jb", function() molten_run_cells(true) end, "Molten: run cells above cursor")
+	end,
+})

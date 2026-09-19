@@ -24,6 +24,10 @@
       "rev": "d7897ba4012c328f2a6bc955f1fe57578ebaceb1",
       "src": "https://github.com/goerz/jupytext.nvim"
     },
+    "markdown-preview.nvim": {
+      "rev": "a923f5fc5ba36a3b17e289dc35dc17f66d0548ee",
+      "src": "https://github.com/iamcco/markdown-preview.nvim"
+    },
     "mini.nvim": {
       "rev": "44657837c7338e52727facc85c1d95bec1f6bd7c",
       "src": "https://github.com/nvim-mini/mini.nvim"
