@@ -656,7 +656,9 @@ vim.keymap.set("n", "<leader>lr", function()
 	for _, client in ipairs(vim.lsp.get_clients()) do
 		client:stop()
 	end
-	vim.cmd("edit")
+	vim.defer_fn(function()
+		vim.cmd("edit")
+	end, 500)
 end, { desc = "Restart LSP" })
 -- ============================================================
 -- Completion
@@ -1025,6 +1027,21 @@ vim.lsp.config("yamlls", {
 	},
 })
 
+vim.lsp.config("ts_ls", {
+	capabilities = capabilities,
+	root_markers = { "tsconfig.json", "package.json", ".git" },
+	filetypes = { "typescript", "typescriptreact", "javascript", "javascriptreact" },
+})
+
+vim.lsp.config("eslint", {
+	capabilities = capabilities,
+	root_markers = { ".eslintrc", ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.json", "eslint.config.js", "eslint.config.mjs", "package.json", ".git" },
+	filetypes = { "typescript", "typescriptreact", "javascript", "javascriptreact" },
+	settings = {
+		workingDirectory = { mode = "auto" },
+	},
+})
+
 enable_lsp("gopls", "gopls")
 vim.lsp.enable("ols")
 vim.lsp.enable("lua_ls")
@@ -1036,6 +1053,8 @@ enable_lsp("tailwindcss", "tailwindcss-language-server")
 enable_lsp("jsonls", "vscode-json-language-server")
 enable_lsp("yamlls", "yaml-language-server")
 enable_lsp("basedpyright", home .. "/.venvs/neovim/bin/basedpyright-langserver")
+enable_lsp("ts_ls", "typescript-language-server")
+enable_lsp("eslint", "vscode-eslint-language-server")
 
 -- otter.nvim: give notebook code cells real LSP. It mirrors each embedded
 -- python chunk into a hidden buffer, runs basedpyright there, and proxies
@@ -1176,6 +1195,31 @@ vim.api.nvim_create_autocmd("FileType", {
 				close_on_exit = false,
 			}):open()
 		end, { desc = "Run current Java class" })
+
+		vim.keymap.set("n", "<leader>jt", function()
+			local rel = vim.fn.expand("%:p"):match("src/test/java/(.+)%.java$")
+			if not rel then
+				vim.notify("Not a Java file under src/test/java", vim.log.levels.WARN)
+				return
+			end
+			local class = rel:gsub("/", ".")
+			local cmd
+			if vim.fn.filereadable(root .. "/pom.xml") == 1 then
+				local mvnw = root .. "/mvnw"
+				local runner = vim.fn.filereadable(mvnw) == 1 and mvnw or "mvn"
+				cmd = runner .. " test -Dtest=" .. class
+			else
+				local gradlew = root .. "/gradlew"
+				local runner = vim.fn.filereadable(gradlew) == 1 and gradlew or "gradle"
+				cmd = runner .. " test --tests " .. class
+			end
+			require("toggleterm.terminal").Terminal:new({
+				cmd = cmd,
+				dir = root,
+				direction = "float",
+				close_on_exit = false,
+			}):open()
+		end, { buffer = 0, desc = "Run current JUnit test file" })
 	end,
 })
 
@@ -1280,7 +1324,28 @@ vim.api.nvim_create_autocmd("FileType", {
 		map("<leader>scc", function() scala_cli("compile") end,                   "scala-cli compile")
 		map("<leader>sct", function() scala_cli("test") end,                      "scala-cli test")
 		map("<leader>scw", function() scala_cli("test -w") end,                   "scala-cli test -w (watch)")
-		map("<leader>scr", function() scala_cli("repl") end,                      "scala-cli repl")
+		map("<leader>scr", function()
+			local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+			local pkg = nil
+			local objects = {}
+			for _, line in ipairs(lines) do
+				if not pkg then
+					local m = line:match("^package%s+(.+)$")
+					if m then pkg = vim.trim(m) end
+				end
+				local obj = line:match("^object%s+(%w+)")
+				if obj then table.insert(objects, obj) end
+			end
+			if pkg then
+				local startup = "import " .. pkg .. ".*"
+				for _, obj in ipairs(objects) do
+					startup = startup .. "; import " .. obj .. ".*"
+				end
+				scala_cli("repl --repl-startup " .. vim.fn.shellescape(startup))
+			else
+				scala_cli("repl")
+			end
+		end, "scala-cli repl (auto-import current package)")
 		map("<leader>sce", function() scala_cli("run", vim.fn.expand("%:p")) end, "scala-cli run current file")
 		map("<leader>scx", function() scala_cli("clean") end,                     "scala-cli clean")
 	end,
@@ -1298,6 +1363,23 @@ vim.api.nvim_create_autocmd("BufWritePre", {
 			timeout_ms = 2000,
 			filter = function(client)
 				return client.name == "lua_ls"
+			end,
+		})
+	end,
+})
+
+local ts_lsp_group = vim.api.nvim_create_augroup("ts-lsp-format", { clear = true })
+
+vim.api.nvim_create_autocmd("BufWritePre", {
+	group = ts_lsp_group,
+	pattern = { "*.ts", "*.tsx", "*.js", "*.jsx" },
+	callback = function(event)
+		vim.lsp.buf.format({
+			async = false,
+			bufnr = event.buf,
+			timeout_ms = 3000,
+			filter = function(client)
+				return client.name == "ts_ls"
 			end,
 		})
 	end,
